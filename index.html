@@ -90,10 +90,11 @@ button.b:hover:not(:disabled){transform:translateY(-1px)}button.b:active:not(:di
 button.b.s{background:#fff;color:var(--ink);border:2px solid var(--line);box-shadow:0 4px 0 var(--line)}
 button.b:disabled{opacity:.5;cursor:not-allowed}
 #startBtn{font-size:clamp(18px,5vw,24px);padding:14px 36px;background:linear-gradient(#ffd98a,var(--yellow));color:var(--ink);box-shadow:0 6px 0 #d8a62e;border-radius:18px}
+#nextBtn{background:linear-gradient(#74c46f,var(--forest));color:#fff;box-shadow:0 4px 0 #1b5a3b}
 :focus-visible{outline:4px solid #1769d2;outline-offset:2px}
 /* teacher */
 details summary{font-weight:900;cursor:pointer;font-size:17px;color:var(--forest);padding:4px 0}
-.row{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
+.row{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;justify-content:center;align-items:center}
 textarea{width:100%;min-height:140px;font:inherit;font-weight:600;padding:12px;border:2px solid var(--line);border-radius:14px;background:#fffdf7;color:var(--ink)}
 select{font:inherit;font-weight:700;padding:11px;border-radius:14px;border:2px solid var(--line);background:#fff;color:var(--ink);min-height:46px}
 #chk{padding-left:20px;font-size:14px;line-height:1.7}
@@ -167,7 +168,10 @@ progress::-moz-progress-bar{background:var(--orange);border-radius:99px}
     <button id="startBtn" class="b" disabled>▶ Start Game</button>
     <button id="mic" aria-label="Record" disabled hidden>🎤</button>
     <canvas id="wave" width="360" height="44" hidden></canvas>
-    <button id="stopBtn" class="b s" hidden>⏹ Stop</button>
+    <div class="row" style="margin-top:5px">
+      <button id="stopBtn" class="b s" hidden>⏹ Stop</button>
+      <button id="nextBtn" class="b" hidden>⏭️ Skip / Next</button>
+    </div>
     <div id="micState" class="micstate">🎙️ Microphone not activated</div>
     <div id="status">Loading…</div>
   </section>
@@ -218,7 +222,7 @@ const PRESETS={
 for(const k in PRESETS){const o=document.createElement('option');o.value=k;o.textContent=k;$('preset').appendChild(o)}
 $('list').value=PRESETS['Everyday 1'];
 
-let transcriber=null,words=[],idx=0,correct=0,attempts=0,score=0,state='boot';
+let transcriber=null,words=[],idx=0,correct=0,attempts=0,score=0,wordFailures=0,state='boot';
 let recorder,chunks=[],raf,recStart,lastVoice,heardVoice,sfx;
 
 /* ---------- Service worker / offline ---------- */
@@ -288,6 +292,8 @@ function setState(s){
   $('mic').disabled=!ready;
   $('startBtn').hidden=!(s==='ready'||s==='boot'||s==='end');
   $('stopBtn').hidden=s!=='recording';
+  $('nextBtn').hidden=!(ready||s==='recording'||s==='thinking');
+  $('nextBtn').disabled=s==='thinking';
   $('wave').hidden=s!=='recording';
 }
 function parseList(){return $('list').value.split('\n').map(w=>w.trim()).filter(Boolean)}
@@ -303,11 +309,12 @@ function newGame(reshuffle){
   if(reshuffle){const w=shuffle(parseList());$('list').value=w.join('\n')}
   words=parseList();
   if(!words.length){$('status').textContent='Please add at least one word in the teacher panel.';return}
-  idx=0;correct=0;attempts=0;score=0;
+  idx=0;correct=0;attempts=0;score=0;wordFailures=0;
   $('victory').classList.add('hide');
   showWord();
 }
 function showWord(){
+  wordFailures=0;
   const g=gen;
   $('heard').textContent='';
   $('word').textContent=words[idx].toUpperCase();
@@ -326,6 +333,16 @@ function showWord(){
     setState('waiting');
   },2250);
 }
+
+function skipWord(){
+  cancelAnimationFrame(raf);
+  if(recorder&&recorder.state!=='inactive'){recorder.onstop=null;try{recorder.stop()}catch{}}
+  $('mic').classList.remove('rec');
+  banner('SKIPPED!','#ff9f43');tone([350,280],.15,'sawtooth');
+  idx++;
+  if(idx>=words.length)finish();else showWord();
+}
+$('nextBtn').onclick=skipWord;
 
 /* ---------- Microphone (one permission, one persistent stream) ---------- */
 let micStream=null,micCtx=null,micSrc=null,analyser=null;
@@ -403,7 +420,7 @@ $('mic').onclick=startRec;$('stopBtn').onclick=stopRec;
 async function recognise(){
   setMic('⏳ Processing audio…');
   try{
-    if(!heardVoice){fail('empty');return}
+    if(!heardVoice){handleFailure('empty');return}
     const blob=new Blob(chunks,{type:recorder.mimeType||'audio/webm'});
     const ctx=new AudioContext();
     const decoded=await ctx.decodeAudioData(await blob.arrayBuffer());
@@ -413,7 +430,7 @@ async function recognise(){
     await ctx.close();
     const out=await transcriber(audio);
     const raw=(out?.text||'').replace(/\[[^\]]*\]|\([^)]*\)/g,'').trim();
-    if(!raw){fail('empty');return}
+    if(!raw){handleFailure('empty');return}
     judge(raw);
   }catch(e){console.error(e);$('status').textContent='Audio error: '+(e?.message||e);setState('waiting')}
 }
@@ -436,18 +453,33 @@ function judge(raw){
       if(idx>=words.length)finish();else showWord();
     })(gen),1500);
   }else{
-    updateStats();banner('TRY AGAIN!','#ffb74d');tone([300,220],.2,'sawtooth');
-    $('status').textContent='Not quite. Tap the microphone and try again.';
+    handleFailure('wrong');
+  }
+}
+
+function handleFailure(kind){
+  wordFailures++;
+  updateStats();
+  if(wordFailures>=2){
+    banner('NEXT WORD!','#ff9f43');tone([300,220,180],.25,'sawtooth');
+    $('status').textContent='Too many failed attempts. Moving to next word...';
+    setTimeout(()=>{
+      idx++;
+      if(idx>=words.length)finish();else showWord();
+    },1200);
+  }else{
+    banner('TRY AGAIN!','#ffb74d');tone([300,220],.2,'sawtooth');
+    if(kind==='empty'){
+      setMic('✅ Recognition completed · microphone ready');
+      $('heard').textContent="I couldn't recognize your voice. Please try again.";
+      $('status').textContent='Tap the microphone and speak clearly.';
+    }else{
+      $('status').textContent='Not quite. You have 1 attempt left for this word!';
+    }
     setState('waiting');
   }
 }
-function fail(kind){
-  setMic('✅ Recognition completed · microphone ready');
-  $('heard').textContent="I couldn't recognize your voice. Please try again.";
-  banner('TRY AGAIN!','#ffb74d');tone([300,220],.2,'sawtooth');
-  $('status').textContent='Tap the microphone and speak clearly.';
-  setState('waiting');
-}
+
 function finish(){
   scene.classList.remove('moving');dino.className='idle';
   setState('end');
